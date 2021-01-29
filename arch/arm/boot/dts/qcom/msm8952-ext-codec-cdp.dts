@@ -95,7 +95,7 @@
 			"us_eu_gpio_act";
 		pinctrl-0 = <&cross_conn_det_sus>;
 		pinctrl-1 = <&cross_conn_det_act>;
-		qcom,cdc-us-euro-gpios = <&msm_gpio 144 0>;
+		qcom,cdc-us-euro-gpios = <&msm_gpio 63 0>;
 
 		qcom,msm-mbhc-hphl-swh = <0>;
 		qcom,msm-mbhc-gnd-swh = <0>;
@@ -142,8 +142,8 @@
 		qcom,max-aux-codec = <2>;
 		qcom,aux-codec = "wsa881x.20170211", "wsa881x.20170212",
 				 "wsa881x.21170213", "wsa881x.21170214";
-		qcom,aux-codec-prefix = "SpkrRight", "SpkrLeft",
-					"SpkrRight", "SpkrLeft";
+		qcom,aux-codec-prefix = "SpkrLeft", "SpkrRight",
+					"SpkrLeft", "SpkrRight";
 	};
 
 	sound-9330 {
@@ -352,7 +352,6 @@
 		interrupts = <0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
 			17 18 19 20 21 22 23 24 25 26 27 28 29
 			30>;
-
 
 		cdc-vdd-buck-supply = <&eldo2_8952>;
 		qcom,cdc-vdd-buck-voltage = <1800000 1800000>;

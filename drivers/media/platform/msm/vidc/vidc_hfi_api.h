@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017,2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -65,6 +65,8 @@
 
 /* 32 encoder and 32 decoder sessions */
 #define VIDC_MAX_SESSIONS               64
+#define VIDC_MAX_DECODE_SESSIONS        16
+#define VIDC_MAX_ENCODE_SESSIONS        16
 
 enum vidc_status {
 	VIDC_ERR_NONE = 0x0,
@@ -117,6 +119,10 @@ enum hal_extradata_id {
 	HAL_EXTRADATA_DIGITAL_ZOOM,
 	HAL_EXTRADATA_LTR_INFO,
 	HAL_EXTRADATA_METADATA_MBI,
+	HAL_EXTRADATA_MASTERING_DISPLAY_COLOUR_SEI,
+	HAL_EXTRADATA_CONTENT_LIGHT_LEVEL_SEI,
+	HAL_EXTRADATA_VUI_DISPLAY_INFO,
+	HAL_EXTRADATA_VPX_COLORSPACE,
 };
 
 enum hal_property {
@@ -219,6 +225,9 @@ enum hal_property {
 	HAL_PARAM_VDEC_NON_SECURE_OUTPUT2,
 	HAL_PARAM_VENC_HIER_P_HYBRID_MODE,
 	HAL_PARAM_VENC_MBI_STATISTICS_MODE,
+	HAL_PARAM_VENC_BITRATE_TYPE,
+	HAL_PARAM_VENC_VIDEO_SIGNAL_INFO,
+	HAL_PARAM_VENC_IFRAMESIZE_TYPE,
 };
 
 enum hal_domain {
@@ -958,6 +967,20 @@ struct hal_vpe_color_space_conversion {
 	u32 csc_limit[HAL_MAX_LIMIT_COEFFS];
 };
 
+struct hal_video_signal_info {
+	u32 color_space;
+	u32 transfer_chars;
+	u32 matrix_coeffs;
+	bool full_range;
+};
+
+enum hal_iframesize_type {
+	HAL_IFRAMESIZE_TYPE_DEFAULT,
+	HAL_IFRAMESIZE_TYPE_MEDIUM,
+	HAL_IFRAMESIZE_TYPE_HUGE,
+	HAL_IFRAMESIZE_TYPE_UNLIMITED,
+};
+
 enum vidc_resource_id {
 	VIDC_RESOURCE_OCMEM = 0x00000001,
 	VIDC_UNUSED_RESORUCE = 0x10000000,
@@ -1307,6 +1330,10 @@ struct vidc_hal_sys_init_done {
 
 struct vidc_hal_session_init_done {
 	struct msm_vidc_capability capability;
+};
+
+struct vidc_hal_session_flush_done {
+	enum hal_flush flush_type;
 };
 
 enum msm_vidc_hfi_type {

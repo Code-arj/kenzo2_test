@@ -102,7 +102,7 @@ struct snd_pcm_ops {
 #define SNDRV_PCM_IOCTL1_TRUE		((void *)1)
 
 #define SNDRV_PCM_IOCTL1_RESET		0
-#define SNDRV_PCM_IOCTL1_INFO		1
+/* 1 is absent slot. */
 #define SNDRV_PCM_IOCTL1_CHANNEL_INFO	2
 #define SNDRV_PCM_IOCTL1_GSTATE		3
 #define SNDRV_PCM_IOCTL1_FIFO_SIZE	4
@@ -136,6 +136,7 @@ struct snd_pcm_ops {
 #define SNDRV_PCM_RATE_96000		(1<<10)		/* 96000Hz */
 #define SNDRV_PCM_RATE_176400		(1<<11)		/* 176400Hz */
 #define SNDRV_PCM_RATE_192000		(1<<12)		/* 192000Hz */
+#define SNDRV_PCM_RATE_384000		(1<<13)		/* 384000Hz */
 
 #define SNDRV_PCM_RATE_CONTINUOUS	(1<<30)		/* continuous range */
 #define SNDRV_PCM_RATE_KNOT		(1<<31)		/* supports more non-continuos rates */
@@ -398,6 +399,7 @@ struct snd_pcm_substream {
 	struct snd_pcm_ops *ops;
 	/* -- runtime information -- */
 	struct snd_pcm_runtime *runtime;
+	spinlock_t runtime_lock;
         /* -- timer section -- */
 	struct snd_timer *timer;		/* timer */
 	unsigned timer_running: 1;	/* time is running */

@@ -89,6 +89,7 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/random.h>
 #include <linux/slab.h>
+#include <linux/netfilter/xt_qtaguid.h>
 
 #include <asm/uaccess.h>
 
@@ -132,6 +133,8 @@ static inline int current_has_network(void)
 	return 1;
 }
 #endif
+
+int sysctl_reserved_port_bind __read_mostly = 1;
 
 /* The inetsw table contains everything that inet_create needs to
  * build a new socket.
@@ -443,6 +446,9 @@ int inet_release(struct socket *sock)
 	if (sk) {
 		long timeout;
 
+#ifdef CONFIG_NETFILTER_XT_MATCH_QTAGUID
+		qtaguid_untag(sock, true);
+#endif
 		sock_rps_reset_flow(sk);
 
 		/* Applications forget to leave groups before exiting */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -224,6 +224,13 @@ struct mdss_mdp_ctl_intfs_ops {
 					struct mdss_mdp_vsync_handler *);
 	int (*config_fps_fnc)(struct mdss_mdp_ctl *ctl, int new_fps);
 	int (*restore_fnc)(struct mdss_mdp_ctl *ctl);
+
+	/*
+	 * reconfigure interface for new resolution, called before (pre=1)
+	 * and after interface has been reconfigured (pre=0)
+	 */
+	int (*reconfigure)(struct mdss_mdp_ctl *ctl,
+			enum dynamic_switch_modes mode, bool pre);
 };
 
 struct mdss_mdp_ctl {
@@ -301,6 +308,7 @@ struct mdss_mdp_ctl {
 	bool force_ctl_start;
 
 	u16 frame_rate;
+	int pending_mode_switch;
 };
 
 struct mdss_mdp_mixer {
@@ -1033,6 +1041,8 @@ int mdss_mdp_mixer_pipe_unstage(struct mdss_mdp_pipe *pipe,
 void mdss_mdp_mixer_unstage_all(struct mdss_mdp_mixer *mixer);
 int mdss_mdp_display_commit(struct mdss_mdp_ctl *ctl, void *arg,
 	struct mdss_mdp_commit_cb *commit_cb);
+int mdss_mdp_display_commit_pp_post_vsync(struct mdss_mdp_ctl *ctl, void *arg,
+	struct mdss_mdp_commit_cb *commit_cb);
 int mdss_mdp_display_wait4comp(struct mdss_mdp_ctl *ctl);
 int mdss_mdp_display_wait4pingpong(struct mdss_mdp_ctl *ctl, bool use_lock);
 int mdss_mdp_display_wakeup_time(struct mdss_mdp_ctl *ctl,
@@ -1060,6 +1070,7 @@ void mdss_hw_init(struct mdss_data_type *mdata);
 int mdss_mdp_pa_config(struct mdp_pa_cfg_data *config, u32 *copyback);
 int mdss_mdp_pa_v2_config(struct mdp_pa_v2_cfg_data *config, u32 *copyback);
 int mdss_mdp_pcc_config(struct mdp_pcc_cfg_data *cfg_ptr, u32 *copyback);
+int mdss_pp_dirty_flags_config(struct mdp_dirty_flag_cfg *config);
 int mdss_mdp_igc_lut_config(struct mdp_igc_lut_data *config, u32 *copyback,
 				u32 copy_from_kernel);
 int mdss_mdp_argc_config(struct mdp_pgc_lut_data *config, u32 *copyback);

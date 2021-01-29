@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015, 2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -22,12 +22,12 @@ static void encode_seemp_section(char *section_start, char *section_eq,
 				char *section_end, bool param, bool numeric,
 				int id, __s32 numeric_value);
 
-static void check_param_range(char *section_eq, bool *param,
+static void check_param_range(char *section_eq, bool param,
 	bool *numeric, int val_len, __s32 *numeric_value)
 {
 	long long_value = 0;
 
-	if (*param && *numeric) {
+	if (param && *numeric) {
 		/*check if 2 bytes & in[-99999,999999]*/
 		*numeric = (val_len >= 2) && (val_len <= 6);
 		if (*numeric) {
@@ -35,9 +35,12 @@ static void check_param_range(char *section_eq, bool *param,
 			!= 0) {
 				*numeric = false;
 			} else {
-				*numeric_value = (__s16)long_value;
-				*numeric = (*numeric_value >= -32768) &&
-					(*numeric_value <= 32767);
+				*numeric_value = (__s32)long_value;
+				/* We are checking whether the value
+				*  lies within 16bits
+				*/
+				*numeric = (long_value >= -32768) &&
+					(long_value <= 32767);
 			}
 		}
 	}
@@ -45,9 +48,15 @@ static void check_param_range(char *section_eq, bool *param,
 
 void encode_seemp_params(struct seemp_logk_blk *blk)
 {
-	char *s = blk->payload.msg + 1;
+	struct seemp_logk_blk tmp;
+	char *s = 0;
+	char *msg_section_start = 0;
+	char *msg_section_eq = 0;
+	char *msg_s = 0;
 
-	blk->payload.msg[BLK_MAX_MSG_SZ - 1] = 0; /* zero-terminate */
+	memcpy(tmp.payload.msg, blk->payload.msg, BLK_MAX_MSG_SZ);
+	s = tmp.payload.msg + 1;
+	tmp.payload.msg[BLK_MAX_MSG_SZ - 1] = 0; /* zero-terminate */
 
 	while (true) {
 		char *section_start = s;
@@ -96,14 +105,19 @@ void encode_seemp_params(struct seemp_logk_blk *blk)
 				ch = *s;
 				*s = 0;
 
-				check_param_range(section_eq, &param,
+				check_param_range(section_eq, param,
 					&numeric, val_len, &numeric_value);
 				*s = ch;
 			}
 		}
 
-		encode_seemp_section(section_start, section_eq, s, param,
-					numeric, id, numeric_value);
+		msg_section_start = blk->payload.msg + (section_start -
+				tmp.payload.msg);
+		msg_section_eq = blk->payload.msg + (section_eq -
+				tmp.payload.msg);
+		msg_s = blk->payload.msg + (s - tmp.payload.msg);
+		encode_seemp_section(msg_section_start, msg_section_eq,
+				msg_s, param, numeric, id, numeric_value);
 
 		if (*s == 0)
 			break;

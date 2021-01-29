@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, 2017 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -33,6 +33,12 @@
 #define DRV_NAME "ipa"
 #define NAT_DEV_NAME "ipaNatTable"
 #define IPA_COOKIE 0x57831603
+#define IPA_RT_RULE_COOKIE 0x57831604
+#define IPA_RT_TBL_COOKIE 0x57831605
+#define IPA_FLT_COOKIE 0x57831606
+#define IPA_HDR_COOKIE 0x57831607
+#define IPA_PROC_HDR_COOKIE 0x57831608
+
 #define MTU_BYTE 1500
 
 #define IPA_MAX_NUM_PIPES 0x14
@@ -48,6 +54,8 @@
 	pr_debug(DRV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
 #define IPAERR(fmt, args...) \
 	pr_err(DRV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
+#define IPAERR_RL(fmt, args...) \
+	pr_err_ratelimited(DRV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
 
 #define WLAN_AMPDU_TX_EP 15
 #define WLAN_PROD_TX_EP  19
@@ -129,7 +137,7 @@
 
 #define IPA_HW_TABLE_ALIGNMENT(start_ofst) \
 	(((start_ofst) + 127) & ~127)
-#define IPA_RT_FLT_HW_RULE_BUF_SIZE	(128)
+#define IPA_RT_FLT_HW_RULE_BUF_SIZE	(256)
 
 #define IPA_HDR_PROC_CTX_TABLE_ALIGNMENT_BYTE 8
 #define IPA_HDR_PROC_CTX_TABLE_ALIGNMENT(start_ofst) \
@@ -183,8 +191,8 @@ struct ipa_mem_buffer {
  */
 struct ipa_flt_entry {
 	struct list_head link;
-	struct ipa_flt_rule rule;
 	u32 cookie;
+	struct ipa_flt_rule rule;
 	struct ipa_flt_tbl *tbl;
 	struct ipa_rt_tbl *rt_tbl;
 	u32 hw_len;
@@ -209,13 +217,13 @@ struct ipa_flt_entry {
  */
 struct ipa_rt_tbl {
 	struct list_head link;
+	u32 cookie;
 	struct list_head head_rt_rule_list;
 	char name[IPA_RESOURCE_NAME_MAX];
 	u32 idx;
 	u32 rule_cnt;
 	u32 ref_cnt;
 	struct ipa_rt_tbl_set *set;
-	u32 cookie;
 	bool in_sys;
 	u32 sz;
 	struct ipa_mem_buffer curr_mem;
@@ -242,9 +250,11 @@ struct ipa_rt_tbl {
  * @id: header entry id
  * @is_eth2_ofst_valid: is eth2_ofst field valid?
  * @eth2_ofst: offset to start of Ethernet-II/802.3 header
+ * @user_deleted: is the header deleted by the user?
  */
 struct ipa_hdr_entry {
 	struct list_head link;
+	u32 cookie;
 	u8 hdr[IPA_HDR_MAX_SIZE];
 	u32 hdr_len;
 	char name[IPA_RESOURCE_NAME_MAX];
@@ -254,11 +264,11 @@ struct ipa_hdr_entry {
 	dma_addr_t phys_base;
 	struct ipa_hdr_proc_ctx_entry *proc_ctx;
 	struct ipa_hdr_offset_entry *offset_entry;
-	u32 cookie;
 	u32 ref_cnt;
 	int id;
 	u8 is_eth2_ofst_valid;
 	u16 eth2_ofst;
+	bool user_deleted;
 };
 
 /**
@@ -334,15 +344,17 @@ struct ipa_hdr_proc_ctx_add_hdr_cmd_seq {
  * @cookie: cookie used for validity check
  * @ref_cnt: reference counter of routing table
  * @id: processing context header entry id
+ * @user_deleted: is the hdr processing context deleted by the user?
  */
 struct ipa_hdr_proc_ctx_entry {
 	struct list_head link;
+	u32 cookie;
 	enum ipa_hdr_proc_type type;
 	struct ipa_hdr_proc_ctx_offset_entry *offset_entry;
 	struct ipa_hdr_entry *hdr;
-	u32 cookie;
 	u32 ref_cnt;
 	int id;
+	bool user_deleted;
 };
 
 /**
@@ -395,8 +407,8 @@ struct ipa_flt_tbl {
  */
 struct ipa_rt_entry {
 	struct list_head link;
-	struct ipa_rt_rule rule;
 	u32 cookie;
+	struct ipa_rt_rule rule;
 	struct ipa_rt_tbl *tbl;
 	struct ipa_hdr_entry *hdr;
 	struct ipa_hdr_proc_ctx_entry *proc_ctx;
@@ -585,6 +597,8 @@ struct ipa_sys_context {
 	struct work_struct repl_work;
 	void (*repl_hdlr)(struct ipa_sys_context *sys);
 	struct ipa_repl_ctx repl;
+	unsigned int repl_trig_cnt;
+	unsigned int repl_trig_thresh;
 
 	/* ordering is important - mutable fields go above */
 	struct ipa_ep_context *ep;
@@ -774,6 +788,19 @@ struct ipa_active_clients {
 	spinlock_t spinlock;
 	bool mutex_locked;
 	int cnt;
+};
+
+enum ipa_wakelock_ref_client {
+	IPA_WAKELOCK_REF_CLIENT_TX  = 0,
+	IPA_WAKELOCK_REF_CLIENT_LAN_RX = 1,
+	IPA_WAKELOCK_REF_CLIENT_WAN_RX = 2,
+	IPA_WAKELOCK_REF_CLIENT_SPS = 3,
+	IPA_WAKELOCK_REF_CLIENT_MAX
+};
+
+struct ipa_wakelock_ref_cnt {
+	spinlock_t spinlock;
+	u32 cnt;
 };
 
 struct ipa_tag_completion {
@@ -1056,10 +1083,22 @@ struct ipa_uc_wdi_ctx {
  * @dec_clients: true if need to decrease active clients count
  * @eot_activity: represent EOT interrupt activity to determine to reset
  *  the inactivity timer
+ * @sps_pm_lock: Lock to protect the sps_pm functionality.
  */
 struct ipa_sps_pm {
 	atomic_t dec_clients;
 	atomic_t eot_activity;
+	struct mutex sps_pm_lock;
+};
+
+/**
+ * struct ipacm_client_info - the client-info indicated from IPACM
+ * @ipacm_client_enum: the enum to indicate tether-client
+ * @ipacm_client_uplink: the bool to indicate pipe for uplink
+ */
+struct ipacm_client_info {
+	enum ipacm_client_enum client_enum;
+	bool uplink;
 };
 
 /**
@@ -1137,6 +1176,8 @@ struct ipa_sps_pm {
  * @ipa_num_pipes: The number of pipes used by IPA HW
  * @skip_uc_pipe_reset: Indicates whether pipe reset via uC needs to be avoided
  * @ipa_client_apps_wan_cons_agg_gro: RMNET_IOCTL_INGRESS_FORMAT_AGG_DATA
+ * @w_lock: Indicates the wakeup source.
+ * @wakelock_ref_cnt: Indicates the number of times wakelock is acquired
 
  * IPA context - holds all relevant info about IPA driver and its state
  */
@@ -1237,10 +1278,14 @@ struct ipa_context {
 	unsigned long peer_bam_dev;
 	u32 peer_bam_map_cnt;
 	u32 wdi_map_cnt;
+	struct wakeup_source w_lock;
+	struct ipa_wakelock_ref_cnt wakelock_ref_cnt;
 
 	/* RMNET_IOCTL_INGRESS_FORMAT_AGG_DATA */
 	bool ipa_client_apps_wan_cons_agg_gro;
 	bool tethered_flow_control;
+	/* M-release support to know client pipes */
+	struct ipacm_client_info ipacm_client[IPA_MAX_NUM_PIPES];
 };
 
 /**
@@ -1403,6 +1448,15 @@ struct ipa_controller {
 
 extern struct ipa_context *ipa_ctx;
 
+/*
+ * Tethering client info
+ */
+void ipa_set_client(int index, enum ipacm_client_enum client, bool uplink);
+
+enum ipacm_client_enum ipa_get_client(int pipe_idx);
+
+bool ipa_get_client_uplink(int pipe_idx);
+
 int ipa_send_one(struct ipa_sys_context *sys, struct ipa_desc *desc,
 		bool in_atomic);
 int ipa_send(struct ipa_sys_context *sys, u32 num_desc, struct ipa_desc *desc,
@@ -1447,8 +1501,11 @@ void ipa_inc_client_enable_clks(void);
 int ipa_inc_client_enable_clks_no_block(void);
 void ipa_dec_client_disable_clks(void);
 int ipa_interrupts_init(u32 ipa_irq, u32 ee, struct device *ipa_dev);
+int ipa_del_hdr_by_user(struct ipa_ioc_del_hdr *hdls, bool by_user);
+int ipa_del_hdr_proc_ctx_by_user(struct ipa_ioc_del_hdr_proc_ctx *hdls,
+	bool by_user);
 int __ipa_del_rt_rule(u32 rule_hdl);
-int __ipa_del_hdr(u32 hdr_hdl);
+int __ipa_del_hdr(u32 hdr_hdl, bool by_user);
 int __ipa_release_hdr(u32 hdr_hdl);
 int __ipa_release_hdr_proc_ctx(u32 proc_ctx_hdl);
 int _ipa_read_gen_reg_v1_1(char *buff, int max_len);
@@ -1571,6 +1628,7 @@ int ipa_uc_interface_init(void);
 int ipa_uc_reset_pipe(enum ipa_client_type ipa_client);
 int ipa_uc_monitor_holb(enum ipa_client_type ipa_client, bool enable);
 int ipa_uc_state_check(void);
+int ipa_uc_loaded_check(void);
 int ipa_uc_send_cmd(u32 cmd, u32 opcode, u32 expected_status,
 		    bool polling_mode, unsigned long timeout_jiffies);
 void ipa_register_panic_hdlr(void);
@@ -1608,4 +1666,6 @@ void ipa_update_repl_threshold(enum ipa_client_type ipa_client);
 void ipa_flow_control(enum ipa_client_type ipa_client, bool enable,
 			uint32_t qmap_id);
 void ipa_sps_irq_control_all(bool enable);
+void ipa_inc_acquire_wakelock(enum ipa_wakelock_ref_client ref_client);
+void ipa_dec_release_wakelock(enum ipa_wakelock_ref_client ref_client);
 #endif /* _IPA_I_H_ */

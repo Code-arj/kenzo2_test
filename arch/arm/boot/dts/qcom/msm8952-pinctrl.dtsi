@@ -32,7 +32,7 @@
 		};
 
 		cdc-reset-line {
-			qcom,pins = <&gp 133>;
+			qcom,pins = <&gp 68>;
 			qcom,num-grp-pins = <1>;
 			qcom,pin-func = <0>;
 			label = "cdc-reset-line";
@@ -41,7 +41,6 @@
 				bias-disable;
 				output-high;
 			};
-
 			cdc_reset_line_sus: cdc_reset_line_off {
 				drive-strength = <16>;
 				bias-disable;
@@ -90,6 +89,22 @@
 			cross_conn_det_sus: lines_off {
 				drive-strength = <2>;
 				bias-pull-down;
+			};
+		};
+
+		ext-spk-pa {
+			qcom,pins = <&gp 2>, <&gp 68>;
+			qcom,num-grp-pins = <2>;
+			qcom,pin-func = <0>;
+			drive-strength = <2>;
+			label = "ext-spk-pa";
+			ext_spk_pa_act: pa_active {
+				output-high;
+				bias-pull-high;
+			};
+			ext_spk_pa_sus: pa_suspend {
+				bias-pull-down;
+				output-low;
 			};
 		};
 
@@ -730,6 +745,32 @@
 			label = "cam_sensor_rear_sleep";
 			/*suspended state */
 			cam_sensor_rear_sleep: cam_sensor_rear_sleep {
+				drive-strength = <2>; /* 2 MA */
+				bias-disable; /* No PULL */
+			};
+		};
+
+		cam_sensor_rear_vaf_default {
+			/* VAF_PWDN */
+			qcom,pins = <&gp 6>;
+			qcom,num-grp-pins = <1>;
+			label = "cam_sensor_rear_vaf_default";
+			/* active state */
+			cam_sensor_rear_vaf_default:
+			cam_sensor_rear_vaf_default {
+				drive-strength = <2>; /* 2 MA */
+				bias-disable; /* No PULL */
+			};
+		};
+
+		cam_sensor_rear_vaf_sleep {
+			/* VAF_PWDN */
+			qcom,pins = <&gp 6>;
+			qcom,num-grp-pins = <1>;
+			label = "cam_sensor_rear_vaf_sleep";
+			/*suspended state */
+			cam_sensor_rear_vaf_sleep:
+			cam_sensor_rear_vaf_sleep {
 				drive-strength = <2>; /* 2 MA */
 				bias-disable; /* No PULL */
 			};

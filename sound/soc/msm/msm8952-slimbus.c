@@ -1,5 +1,4 @@
-/* Copyright (c) 2015, The Linux Foundation. All rights reserved.
- * Copyright (C) 2016 XiaoMi, Inc.
+/* Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -108,7 +107,6 @@ static void *adsp_state_notifier;
 
 static int msm8952_enable_codec_mclk(struct snd_soc_codec *codec, int enable,
 					bool dapm);
-
 /*
  * Android L spec
  * Need to report LINEIN
@@ -130,6 +128,9 @@ static struct wcd_mbhc_config wcd_mbhc_cfg = {
 	.key_code[6] = 0,
 	.key_code[7] = 0,
 	.linein_th = 5000,
+	.mbhc_micbias = MIC_BIAS_2,
+	.anc_micbias = MIC_BIAS_2,
+	.enable_anc_mic_detect = false,
 };
 
 static struct wcd9xxx_mbhc_config wcd9xxx_mbhc_cfg = {
@@ -357,10 +358,10 @@ int msm895x_wsa881x_init(struct snd_soc_dapm_context *dapm)
 	struct snd_soc_card *card = dapm->codec->card;
 	struct msm8952_asoc_mach_data *pdata = snd_soc_card_get_drvdata(card);
 	struct msm895x_auxcodec_prefix_map codec_prefix_map[MAX_AUX_CODECS] = {
-	{ "wsa881x.20170211", "SpkrRight" },
-	{ "wsa881x.20170212", "SpkrLeft" },
-	{ "wsa881x.21170213", "SpkrRight" },
-	{ "wsa881x.21170214", "SpkrLeft" } };
+	{ "wsa881x.20170211", "SpkrLeft" },
+	{ "wsa881x.20170212", "SpkrRight" },
+	{ "wsa881x.21170213", "SpkrLeft" },
+	{ "wsa881x.21170214", "SpkrRight" } };
 	u8 i;
 
 	if (!dapm->codec->name) {
@@ -535,6 +536,10 @@ static int mi2s_rx_bit_format_get(struct snd_kcontrol *kcontrol,
 {
 
 	switch (mi2s_rx_bit_format) {
+	case SNDRV_PCM_FORMAT_S24_3LE:
+		ucontrol->value.integer.value[0] = 2;
+		break;
+
 	case SNDRV_PCM_FORMAT_S24_LE:
 		ucontrol->value.integer.value[0] = 1;
 		break;
@@ -556,6 +561,9 @@ static int mi2s_rx_bit_format_put(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
 	switch (ucontrol->value.integer.value[0]) {
+	case 2:
+		mi2s_rx_bit_format = SNDRV_PCM_FORMAT_S24_3LE;
+		break;
 	case 1:
 		mi2s_rx_bit_format = SNDRV_PCM_FORMAT_S24_LE;
 		break;
@@ -630,6 +638,10 @@ static int slim5_rx_bit_format_get(struct snd_kcontrol *kcontrol,
 {
 
 	switch (slim5_rx_bit_format) {
+	case SNDRV_PCM_FORMAT_S24_3LE:
+		ucontrol->value.integer.value[0] = 2;
+		break;
+
 	case SNDRV_PCM_FORMAT_S24_LE:
 		ucontrol->value.integer.value[0] = 1;
 		break;
@@ -651,6 +663,9 @@ static int slim5_rx_bit_format_put(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
 	switch (ucontrol->value.integer.value[0]) {
+	case 2:
+		slim5_rx_bit_format = SNDRV_PCM_FORMAT_S24_3LE;
+		break;
 	case 1:
 		slim5_rx_bit_format = SNDRV_PCM_FORMAT_S24_LE;
 		break;
@@ -667,6 +682,10 @@ static int slim0_rx_bit_format_get(struct snd_kcontrol *kcontrol,
 {
 
 	switch (slim0_rx_bit_format) {
+	case SNDRV_PCM_FORMAT_S24_3LE:
+		ucontrol->value.integer.value[0] = 2;
+		break;
+
 	case SNDRV_PCM_FORMAT_S24_LE:
 		ucontrol->value.integer.value[0] = 1;
 		break;
@@ -688,6 +707,9 @@ static int slim0_rx_bit_format_put(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
 	switch (ucontrol->value.integer.value[0]) {
+	case 2:
+		slim0_rx_bit_format = SNDRV_PCM_FORMAT_S24_3LE;
+		break;
 	case 1:
 		slim0_rx_bit_format = SNDRV_PCM_FORMAT_S24_LE;
 		break;
@@ -702,7 +724,15 @@ static int slim0_rx_bit_format_put(struct snd_kcontrol *kcontrol,
 static int msm_vi_feed_tx_ch_get(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = (msm_vi_feed_tx_ch/2 - 1);
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+
+	if (!strcmp(dev_name(codec->dev), "tasha_codec"))
+		ucontrol->value.integer.value[0] =
+					(msm_vi_feed_tx_ch - 1);
+	else
+		ucontrol->value.integer.value[0] =
+					(msm_vi_feed_tx_ch/2 - 1);
+
 	pr_debug("%s: msm_vi_feed_tx_ch = %ld\n", __func__,
 				ucontrol->value.integer.value[0]);
 	return 0;
@@ -711,8 +741,15 @@ static int msm_vi_feed_tx_ch_get(struct snd_kcontrol *kcontrol,
 static int msm_vi_feed_tx_ch_put(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	msm_vi_feed_tx_ch =
-		roundup_pow_of_two(ucontrol->value.integer.value[0] + 2);
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+
+	if (!strcmp(dev_name(codec->dev), "tasha_codec"))
+		msm_vi_feed_tx_ch =
+			ucontrol->value.integer.value[0] + 1;
+	else
+		msm_vi_feed_tx_ch =
+			roundup_pow_of_two(
+				ucontrol->value.integer.value[0] + 2);
 
 	pr_debug("%s: msm_vi_feed_tx_ch = %d\n", __func__, msm_vi_feed_tx_ch);
 	return 1;
@@ -741,6 +778,9 @@ static int slim0_tx_bit_format_get(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
 	switch (slim0_tx_bit_format) {
+	case SNDRV_PCM_FORMAT_S24_3LE:
+		ucontrol->value.integer.value[0] = 2;
+		break;
 	case SNDRV_PCM_FORMAT_S24_LE:
 		ucontrol->value.integer.value[0] = 1;
 		break;
@@ -761,6 +801,9 @@ static int slim0_tx_bit_format_put(struct snd_kcontrol *kcontrol,
 	int rc = 0;
 
 	switch (ucontrol->value.integer.value[0]) {
+	case 2:
+		slim0_tx_bit_format = SNDRV_PCM_FORMAT_S24_3LE;
+		break;
 	case 1:
 		slim0_tx_bit_format = SNDRV_PCM_FORMAT_S24_LE;
 		break;
@@ -935,13 +978,13 @@ static const char *const slim0_tx_ch_text[] = {"One", "Two", "Three", "Four",
 						"Five", "Six", "Seven",
 						"Eight"};
 static const char *const vi_feed_ch_text[] = {"One", "Two"};
-static char const *rx_bit_format_text[] = {"S16_LE", "S24_LE"};
+static char const *rx_bit_format_text[] = {"S16_LE", "S24_LE", "S24_3LE"};
 static char const *slim0_rx_sample_rate_text[] = {"KHZ_48", "KHZ_96",
 					"KHZ_192", "KHZ_44P1"};
 static const char *const slim5_rx_ch_text[] = {"One", "Two"};
 static char const *slim5_rx_sample_rate_text[] = {"KHZ_48", "KHZ_96",
 	"KHZ_192", "KHZ_44P1"};
-static char const *slim5_rx_bit_format_text[] = {"S16_LE", "S24_LE"};
+static char const *slim5_rx_bit_format_text[] = {"S16_LE", "S24_LE", "S24_3LE"};
 static const char *const proxy_rx_ch_text[] = {"One", "Two", "Three", "Four",
 	"Five", "Six", "Seven", "Eight"};
 
@@ -949,12 +992,13 @@ static const struct soc_enum msm_snd_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, spk_function),
 	SOC_ENUM_SINGLE_EXT(2, slim0_rx_ch_text),
 	SOC_ENUM_SINGLE_EXT(8, slim0_tx_ch_text),
-	SOC_ENUM_SINGLE_EXT(2, rx_bit_format_text),
+	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(rx_bit_format_text), rx_bit_format_text),
 	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(slim0_rx_sample_rate_text),
 				slim0_rx_sample_rate_text),
 	SOC_ENUM_SINGLE_EXT(2, vi_feed_ch_text),
 	SOC_ENUM_SINGLE_EXT(4, slim5_rx_sample_rate_text),
-	SOC_ENUM_SINGLE_EXT(2, slim5_rx_bit_format_text),
+	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(slim5_rx_bit_format_text),
+			    slim5_rx_bit_format_text),
 	SOC_ENUM_SINGLE_EXT(2, slim5_rx_ch_text),
 	SOC_ENUM_SINGLE_EXT(8, proxy_rx_ch_text),
 };
@@ -1310,7 +1354,7 @@ int msm_slim_4_tx_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 		param_set_mask(params, SNDRV_PCM_HW_PARAM_FORMAT,
 			SNDRV_PCM_FORMAT_S32_LE);
 		rate->min = rate->max = SAMPLING_RATE_8KHZ;
-		channels->min = channels->max = msm_vi_feed_tx_ch/2;
+		channels->min = channels->max = msm_vi_feed_tx_ch;
 		pr_debug("%s: tasha vi sample rate = %d\n",
 				__func__, rate->min);
 	} else {
@@ -1524,7 +1568,9 @@ static int quat_mi2s_clk_ctl(struct snd_pcm_substream *substream, bool enable)
 
 	if (enable) {
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-			if (mi2s_rx_bit_format == SNDRV_PCM_FORMAT_S24_LE)
+			mi2s_rx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_12_P288_MHZ;
+			if ((mi2s_rx_bit_format == SNDRV_PCM_FORMAT_S24_LE) ||
+                            (mi2s_rx_bit_format == SNDRV_PCM_FORMAT_S24_3LE))
 				mi2s_rx_clk.clk_val1 =
 					Q6AFE_LPASS_IBIT_CLK_3_P072_MHZ;
 			else
@@ -1535,6 +1581,7 @@ static int quat_mi2s_clk_ctl(struct snd_pcm_substream *substream, bool enable)
 					&mi2s_rx_clk);
 		} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
 			mi2s_tx_clk.clk_val1 = Q6AFE_LPASS_IBIT_CLK_1_P536_MHZ;
+			mi2s_tx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_12_P288_MHZ;
 			ret = afe_set_lpass_clock(
 					AFE_PORT_ID_QUATERNARY_MI2S_TX,
 					&mi2s_tx_clk);
@@ -1548,11 +1595,13 @@ static int quat_mi2s_clk_ctl(struct snd_pcm_substream *substream, bool enable)
 	} else {
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 			mi2s_rx_clk.clk_val1 = Q6AFE_LPASS_IBIT_CLK_DISABLE;
+			mi2s_rx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_DISABLE;
 			ret = afe_set_lpass_clock(
 				AFE_PORT_ID_QUATERNARY_MI2S_RX,
 				&mi2s_rx_clk);
 		} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
 			mi2s_tx_clk.clk_val1 = Q6AFE_LPASS_IBIT_CLK_DISABLE;
+			mi2s_tx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_DISABLE;
 			ret = afe_set_lpass_clock(
 				AFE_PORT_ID_QUATERNARY_MI2S_TX,
 				&mi2s_tx_clk);
@@ -1573,6 +1622,7 @@ static int quin_mi2s_sclk_ctl(struct snd_pcm_substream *substream, bool enable)
 
 	if (enable) {
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			mi2s_rx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_12_P288_MHZ;
 			if (mi2s_rx_bit_format == SNDRV_PCM_FORMAT_S24_LE)
 				mi2s_rx_clk.clk_val1 =
 					Q6AFE_LPASS_IBIT_CLK_3_P072_MHZ;
@@ -1584,6 +1634,7 @@ static int quin_mi2s_sclk_ctl(struct snd_pcm_substream *substream, bool enable)
 					&mi2s_rx_clk);
 		} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
 			mi2s_tx_clk.clk_val1 = Q6AFE_LPASS_IBIT_CLK_1_P536_MHZ;
+			mi2s_tx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_12_P288_MHZ;
 			ret = afe_set_lpass_clock(
 					AFE_PORT_ID_QUINARY_MI2S_TX,
 					&mi2s_tx_clk);
@@ -1597,11 +1648,13 @@ static int quin_mi2s_sclk_ctl(struct snd_pcm_substream *substream, bool enable)
 	} else {
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 			mi2s_rx_clk.clk_val1 = Q6AFE_LPASS_IBIT_CLK_DISABLE;
+			mi2s_rx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_DISABLE;
 			ret = afe_set_lpass_clock(
 					AFE_PORT_ID_QUINARY_MI2S_RX,
 					&mi2s_rx_clk);
 		} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
 			mi2s_tx_clk.clk_val1 = Q6AFE_LPASS_IBIT_CLK_DISABLE;
+			mi2s_tx_clk.clk_val2 = Q6AFE_LPASS_OSR_CLK_DISABLE;
 			ret = afe_set_lpass_clock(
 					AFE_PORT_ID_QUINARY_MI2S_TX,
 					&mi2s_tx_clk);
@@ -2123,8 +2176,11 @@ int msm_audrx_init(struct snd_soc_pcm_runtime *rtd)
 		 */
 		if (aux_dev)
 			if (!strcmp(aux_dev->codec_name, WSA8810_NAME_1) ||
-				!strcmp(aux_dev->codec_name, WSA8810_NAME_2))
+				!strcmp(aux_dev->codec_name, WSA8810_NAME_2)) {
 				tasha_set_spkr_mode(codec, SPKR_MODE_1);
+				tasha_set_spkr_gain_offset(rtd->codec,
+							RX_GAIN_OFFSET_M1P5_DB);
+			}
 	}
 
 	snd_soc_dapm_enable_pin(dapm, "Lineout_1 amp");
@@ -2575,6 +2631,13 @@ static int msm8952_asoc_machine_probe(struct platform_device *pdev)
 		goto err;
 	}
 
+	ret = core_get_adsp_ver();
+	if (ret < 0) {
+		ret = -EPROBE_DEFER;
+		dev_dbg(&pdev->dev, "%s: Get adsp version failed (%d)\n",
+						__func__, ret);
+		goto err;
+	}
 	ret = snd_soc_register_card(card);
 	if (ret) {
 		if (codec_reg_done)

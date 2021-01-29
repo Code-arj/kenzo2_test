@@ -701,7 +701,7 @@ void neigh_destroy(struct neighbour *neigh)
 	NEIGH_CACHE_STAT_INC(neigh->tbl, destroys);
 
 	if (!neigh->dead) {
-		pr_warn("Destroying alive neighbour %p\n", neigh);
+		pr_warn("Destroying alive neighbour %pK\n", neigh);
 		dump_stack();
 		return;
 	}
@@ -929,6 +929,7 @@ static void neigh_timer_handler(unsigned long arg)
 			neigh->nud_state = NUD_PROBE;
 			neigh->updated = jiffies;
 			atomic_set(&neigh->probes, 0);
+			notify = 1;
 			next = now + neigh->parms->retrans_time;
 		}
 	} else {
@@ -949,7 +950,11 @@ static void neigh_timer_handler(unsigned long arg)
 		if (!mod_timer(&neigh->timer, next))
 			neigh_hold(neigh);
 	}
-	if (neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE | NUD_STALE)) {
+
+	if (neigh_probe_enable) {
+		if (neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE | NUD_STALE))
+			neigh_probe(neigh);
+	} else if (neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE)) {
 		neigh_probe(neigh);
 	} else {
 out:
@@ -1156,6 +1161,8 @@ int neigh_update(struct neighbour *neigh, const u8 *lladdr, u8 new,
 
 	if (new != old) {
 		neigh_del_timer(neigh);
+		if (new & NUD_PROBE)
+			atomic_set(&neigh->probes, 0);
 		if (new & NUD_IN_TIMER)
 			neigh_add_timer(neigh, (jiffies +
 						((new & NUD_REACHABLE) ?
@@ -1326,7 +1333,7 @@ int neigh_resolve_output(struct neighbour *neigh, struct sk_buff *skb)
 out:
 	return rc;
 discard:
-	neigh_dbg(1, "%s: dst=%p neigh=%p\n", __func__, dst, neigh);
+	neigh_dbg(1, "%s: dst=%pK neigh=%pK\n", __func__, dst, neigh);
 out_kfree_skb:
 	rc = -EINVAL;
 	kfree_skb(skb);

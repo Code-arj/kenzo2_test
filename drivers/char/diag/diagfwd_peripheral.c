@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -247,7 +247,7 @@ static void diagfwd_data_read_done(struct diagfwd_info *fwd_info,
 			temp_buf = fwd_info->buf_2;
 			write_buf = fwd_info->buf_2->data;
 		} else {
-			pr_err("diag: In %s, no match for buffer %p, peripheral %d, type: %d\n",
+			pr_err("diag: In %s, no match for buffer %pK, peripheral %d, type: %d\n",
 			       __func__, buf, fwd_info->peripheral,
 			       fwd_info->type);
 			goto end;
@@ -261,7 +261,7 @@ static void diagfwd_data_read_done(struct diagfwd_info *fwd_info,
 			   fwd_info->buf_2->data_raw == buf) {
 			temp_buf = fwd_info->buf_2;
 		} else {
-			pr_err("diag: In %s, no match for non encode buffer %p, peripheral %d, type: %d\n",
+			pr_err("diag: In %s, no match for non encode buffer %pK, peripheral %d, type: %d\n",
 			       __func__, buf, fwd_info->peripheral,
 			       fwd_info->type);
 			goto end;
@@ -281,7 +281,7 @@ static void diagfwd_data_read_done(struct diagfwd_info *fwd_info,
 			   fwd_info->buf_2->data_raw == buf) {
 			temp_buf = fwd_info->buf_2;
 		} else {
-			pr_err("diag: In %s, no match for non encode buffer %p, peripheral %d, type: %d\n",
+			pr_err("diag: In %s, no match for non encode buffer %pK, peripheral %d, type: %d\n",
 			       __func__, buf, fwd_info->peripheral,
 			       fwd_info->type);
 			goto end;
@@ -428,15 +428,13 @@ int diagfwd_peripheral_init(void)
 			fwd_info->inited = 1;
 			fwd_info->read_bytes = 0;
 			fwd_info->write_bytes = 0;
-			spin_lock_init(&fwd_info->buf_lock);
+			mutex_init(&fwd_info->buf_mutex);
 			mutex_init(&fwd_info->data_mutex);
 		}
 	}
 
 	for (peripheral = 0; peripheral < NUM_PERIPHERALS; peripheral++) {
 		for (type = 0; type < NUM_TYPES; type++) {
-			if (type == TYPE_CNTL)
-				continue;
 			fwd_info = &peripheral_info[type][peripheral];
 			fwd_info->peripheral = peripheral;
 			fwd_info->type = type;
@@ -445,11 +443,16 @@ int diagfwd_peripheral_init(void)
 			fwd_info->ch_open = 0;
 			fwd_info->read_bytes = 0;
 			fwd_info->write_bytes = 0;
-			fwd_info->inited = 1;
-			spin_lock_init(&fwd_info->buf_lock);
+			mutex_init(&fwd_info->buf_mutex);
 			mutex_init(&fwd_info->data_mutex);
+			/*
+			 * This state shouldn't be set for Control channels
+			 * during initialization. This is set when the feature
+			 * mask is received for the first time.
+			 */
+			if (type != TYPE_CNTL)
+				fwd_info->inited = 1;
 		}
-
 		driver->diagfwd_data[peripheral] =
 			&peripheral_info[TYPE_DATA][peripheral];
 		driver->diagfwd_cntl[peripheral] =
@@ -474,6 +477,7 @@ void diagfwd_peripheral_exit(void)
 	uint8_t peripheral;
 	uint8_t type;
 	struct diagfwd_info *fwd_info = NULL;
+	int transport = 0;
 
 	diag_smd_exit();
 	diag_socket_exit();
@@ -496,7 +500,10 @@ void diagfwd_peripheral_exit(void)
 		driver->diagfwd_dci_cmd[peripheral] = NULL;
 	}
 
-	kfree(early_init_info);
+	for (transport = 0; transport < NUM_TRANSPORT; transport++) {
+		kfree(early_init_info[transport]);
+		early_init_info[transport] = NULL;
+	}
 }
 
 int diagfwd_cntl_register(uint8_t transport, uint8_t peripheral, void *ctxt,
@@ -609,6 +616,7 @@ void diagfwd_close_transport(uint8_t transport, uint8_t peripheral)
 	struct diagfwd_info *dest_info = NULL;
 	int (*init_fn)(uint8_t) = NULL;
 	void (*invalidate_fn)(void *, struct diagfwd_info *) = NULL;
+	int (*check_channel_state)(void *) = NULL;
 	uint8_t transport_open = 0;
 
 	if (peripheral >= NUM_PERIPHERALS)
@@ -619,24 +627,44 @@ void diagfwd_close_transport(uint8_t transport, uint8_t peripheral)
 		transport_open = TRANSPORT_SOCKET;
 		init_fn = diag_socket_init_peripheral;
 		invalidate_fn = diag_socket_invalidate;
+		check_channel_state = diag_socket_check_state;
 		break;
 	case TRANSPORT_SOCKET:
 		transport_open = TRANSPORT_SMD;
 		init_fn = diag_smd_init_peripheral;
 		invalidate_fn = diag_smd_invalidate;
+		check_channel_state = diag_smd_check_state;
 		break;
 	default:
 		return;
 
 	}
 
+	mutex_lock(&driver->diagfwd_channel_mutex[peripheral]);
+	fwd_info = &early_init_info[transport][peripheral];
+	if (fwd_info->p_ops && fwd_info->p_ops->close)
+		fwd_info->p_ops->close(fwd_info->ctxt);
 	fwd_info = &early_init_info[transport_open][peripheral];
 	dest_info = &peripheral_info[TYPE_CNTL][peripheral];
-	memcpy(dest_info, fwd_info, sizeof(struct diagfwd_info));
+	dest_info->inited = 1;
+	dest_info->ctxt = fwd_info->ctxt;
+	dest_info->p_ops = fwd_info->p_ops;
+	dest_info->c_ops = fwd_info->c_ops;
+	dest_info->ch_open = fwd_info->ch_open;
+	dest_info->read_bytes = fwd_info->read_bytes;
+	dest_info->write_bytes = fwd_info->write_bytes;
+	dest_info->inited = fwd_info->inited;
+	dest_info->buf_1 = fwd_info->buf_1;
+	dest_info->buf_2 = fwd_info->buf_2;
+	dest_info->transport = fwd_info->transport;
 	invalidate_fn(dest_info->ctxt, dest_info);
-	diagfwd_queue_read(dest_info);
+	if (!check_channel_state(dest_info->ctxt))
+		diagfwd_late_open(dest_info);
+	diagfwd_cntl_open(dest_info);
 	init_fn(peripheral);
-	diag_cntl_channel_open(dest_info);
+	mutex_unlock(&driver->diagfwd_channel_mutex[peripheral]);
+	diagfwd_queue_read(&peripheral_info[TYPE_DATA][peripheral]);
+	diagfwd_queue_read(&peripheral_info[TYPE_CMD][peripheral]);
 }
 
 int diagfwd_write(uint8_t peripheral, uint8_t type, void *buf, int len)
@@ -914,7 +942,7 @@ void diagfwd_channel_read(struct diagfwd_info *fwd_info)
 	if (!(fwd_info->p_ops && fwd_info->p_ops->read && fwd_info->ctxt))
 		goto fail_return;
 
-	DIAG_LOG(DIAG_DEBUG_PERIPHERALS, "issued a read p: %d t: %d buf: %p\n",
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS, "issued a read p: %d t: %d buf: %pK\n",
 		 fwd_info->peripheral, fwd_info->type, read_buf);
 	err = fwd_info->p_ops->read(fwd_info->ctxt, read_buf, read_len);
 	if (err)
@@ -957,7 +985,6 @@ static void diagfwd_queue_read(struct diagfwd_info *fwd_info)
 
 void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 {
-	unsigned long flags;
 
 	if (!fwd_info)
 		return;
@@ -968,10 +995,10 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 		return;
 	}
 
-	spin_lock_irqsave(&fwd_info->buf_lock, flags);
+	mutex_lock(&fwd_info->buf_mutex);
 	if (!fwd_info->buf_1) {
 		fwd_info->buf_1 = kzalloc(sizeof(struct diagfwd_buf_t),
-					  GFP_ATOMIC);
+					  GFP_KERNEL);
 		if (!fwd_info->buf_1)
 			goto err;
 		kmemleak_not_leak(fwd_info->buf_1);
@@ -979,7 +1006,7 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 	if (!fwd_info->buf_1->data) {
 		fwd_info->buf_1->data = kzalloc(PERIPHERAL_BUF_SZ +
 					APF_DIAG_PADDING,
-					GFP_ATOMIC);
+					GFP_KERNEL);
 		if (!fwd_info->buf_1->data)
 			goto err;
 		fwd_info->buf_1->len = PERIPHERAL_BUF_SZ;
@@ -991,7 +1018,7 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 	if (fwd_info->type == TYPE_DATA) {
 		if (!fwd_info->buf_2) {
 			fwd_info->buf_2 = kzalloc(sizeof(struct diagfwd_buf_t),
-					      GFP_ATOMIC);
+					      GFP_KERNEL);
 			if (!fwd_info->buf_2)
 				goto err;
 			kmemleak_not_leak(fwd_info->buf_2);
@@ -1000,7 +1027,7 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 		if (!fwd_info->buf_2->data) {
 			fwd_info->buf_2->data = kzalloc(PERIPHERAL_BUF_SZ +
 							APF_DIAG_PADDING,
-						    GFP_ATOMIC);
+						    GFP_KERNEL);
 			if (!fwd_info->buf_2->data)
 				goto err;
 			fwd_info->buf_2->len = PERIPHERAL_BUF_SZ;
@@ -1016,7 +1043,7 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 				fwd_info->buf_1->data_raw =
 					kzalloc(PERIPHERAL_BUF_SZ +
 						APF_DIAG_PADDING,
-						GFP_ATOMIC);
+						GFP_KERNEL);
 				if (!fwd_info->buf_1->data_raw)
 					goto err;
 				fwd_info->buf_1->len_raw = PERIPHERAL_BUF_SZ;
@@ -1026,7 +1053,7 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 				fwd_info->buf_2->data_raw =
 					kzalloc(PERIPHERAL_BUF_SZ +
 						APF_DIAG_PADDING,
-						GFP_ATOMIC);
+						GFP_KERNEL);
 				if (!fwd_info->buf_2->data_raw)
 					goto err;
 				fwd_info->buf_2->len_raw = PERIPHERAL_BUF_SZ;
@@ -1040,7 +1067,7 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 		if (!fwd_info->buf_1->data_raw) {
 			fwd_info->buf_1->data_raw = kzalloc(PERIPHERAL_BUF_SZ +
 						APF_DIAG_PADDING,
-							GFP_ATOMIC);
+							GFP_KERNEL);
 			if (!fwd_info->buf_1->data_raw)
 				goto err;
 			fwd_info->buf_1->len_raw = PERIPHERAL_BUF_SZ;
@@ -1048,11 +1075,11 @@ void diagfwd_buffers_init(struct diagfwd_info *fwd_info)
 		}
 	}
 
-	spin_unlock_irqrestore(&fwd_info->buf_lock, flags);
+	mutex_unlock(&fwd_info->buf_mutex);
 	return;
 
 err:
-	spin_unlock_irqrestore(&fwd_info->buf_lock, flags);
+	mutex_unlock(&fwd_info->buf_mutex);
 	diagfwd_buffers_exit(fwd_info);
 
 	return;
@@ -1060,12 +1087,11 @@ err:
 
 static void diagfwd_buffers_exit(struct diagfwd_info *fwd_info)
 {
-	unsigned long flags;
 
 	if (!fwd_info)
 		return;
 
-	spin_lock_irqsave(&fwd_info->buf_lock, flags);
+	mutex_lock(&fwd_info->buf_mutex);
 	if (fwd_info->buf_1) {
 		kfree(fwd_info->buf_1->data);
 		fwd_info->buf_1->data = NULL;
@@ -1082,6 +1108,6 @@ static void diagfwd_buffers_exit(struct diagfwd_info *fwd_info)
 		kfree(fwd_info->buf_2);
 		fwd_info->buf_2 = NULL;
 	}
-	spin_unlock_irqrestore(&fwd_info->buf_lock, flags);
+	mutex_unlock(&fwd_info->buf_mutex);
 }
 

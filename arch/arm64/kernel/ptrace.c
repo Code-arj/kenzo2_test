@@ -26,6 +26,7 @@
 #include <linux/smp.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
+#include <linux/seccomp.h>
 #include <linux/security.h>
 #include <linux/init.h>
 #include <linux/signal.h>
@@ -217,13 +218,13 @@ static int ptrace_hbp_fill_attr_ctrl(unsigned int note_type,
 				     struct arch_hw_breakpoint_ctrl ctrl,
 				     struct perf_event_attr *attr)
 {
-	int err, len, type, disabled = !ctrl.enabled;
+	int err, len, type, offset, disabled = !ctrl.enabled;
 
 	attr->disabled = disabled;
 	if (disabled)
 		return 0;
 
-	err = arch_bp_generic_fields(ctrl, &len, &type);
+	err = arch_bp_generic_fields(ctrl, &len, &type, &offset);
 	if (err)
 		return err;
 
@@ -242,6 +243,7 @@ static int ptrace_hbp_fill_attr_ctrl(unsigned int note_type,
 
 	attr->bp_len	= len;
 	attr->bp_type	= type;
+	attr->bp_addr	+= offset;
 
 	return 0;
 }
@@ -294,7 +296,7 @@ static int ptrace_hbp_get_addr(unsigned int note_type,
 	if (IS_ERR(bp))
 		return PTR_ERR(bp);
 
-	*addr = bp ? bp->attr.bp_addr : 0;
+	*addr = bp ? counter_arch_bp(bp)->address : 0;
 	return 0;
 }
 
@@ -548,6 +550,32 @@ static int tls_set(struct task_struct *target, const struct user_regset *regset,
 	return ret;
 }
 
+static int system_call_get(struct task_struct *target,
+			   const struct user_regset *regset,
+			   unsigned int pos, unsigned int count,
+			   void *kbuf, void __user *ubuf)
+{
+	int syscallno = task_pt_regs(target)->syscallno;
+
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &syscallno, 0, -1);
+}
+
+static int system_call_set(struct task_struct *target,
+			   const struct user_regset *regset,
+			   unsigned int pos, unsigned int count,
+			   const void *kbuf, const void __user *ubuf)
+{
+	int syscallno, ret;
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &syscallno, 0, -1);
+	if (ret)
+		return ret;
+
+	task_pt_regs(target)->syscallno = syscallno;
+	return ret;
+}
+
 enum aarch64_regset {
 	REGSET_GPR,
 	REGSET_FPR,
@@ -556,6 +584,7 @@ enum aarch64_regset {
 	REGSET_HW_BREAK,
 	REGSET_HW_WATCH,
 #endif
+	REGSET_SYSTEM_CALL,
 };
 
 static const struct user_regset aarch64_regsets[] = {
@@ -605,6 +634,14 @@ static const struct user_regset aarch64_regsets[] = {
 		.set = hw_break_set,
 	},
 #endif
+	[REGSET_SYSTEM_CALL] = {
+		.core_note_type = NT_ARM_SYSTEM_CALL,
+		.n = 1,
+		.size = sizeof(int),
+		.align = sizeof(int),
+		.get = system_call_get,
+		.set = system_call_set,
+	},
 };
 
 static const struct user_regset_view user_aarch64_view = {
@@ -660,8 +697,10 @@ static int compat_gpr_get(struct task_struct *target,
 			kbuf += sizeof(reg);
 		} else {
 			ret = copy_to_user(ubuf, &reg, sizeof(reg));
-			if (ret)
+			if (ret) {
+				ret = -EFAULT;
 				break;
+			}
 
 			ubuf += sizeof(reg);
 		}
@@ -699,8 +738,10 @@ static int compat_gpr_set(struct task_struct *target,
 			kbuf += sizeof(reg);
 		} else {
 			ret = copy_from_user(&reg, ubuf, sizeof(reg));
-			if (ret)
-				return ret;
+			if (ret) {
+				ret = -EFAULT;
+				break;
+			}
 
 			ubuf += sizeof(reg);
 		}
@@ -1106,11 +1147,35 @@ static void tracehook_report_syscall(struct pt_regs *regs,
 
 asmlinkage int syscall_trace_enter(struct pt_regs *regs)
 {
+	unsigned int saved_syscallno = regs->syscallno;
+
+	/* Do the secure computing check first; failures should be fast. */
+	if (secure_computing(regs->syscallno) == -1)
+		return RET_SKIP_SYSCALL_TRACE;
+
 	if (test_thread_flag(TIF_SYSCALL_TRACE))
 		tracehook_report_syscall(regs, PTRACE_SYSCALL_ENTER);
 
 	if (test_thread_flag(TIF_SYSCALL_TRACEPOINT))
 		trace_sys_enter(regs, regs->syscallno);
+
+	if (IS_SKIP_SYSCALL(regs->syscallno)) {
+		/*
+		 * RESTRICTION: we can't modify a return value of user
+		 * issued syscall(-1) here. In order to ease this flavor,
+		 * we need to treat whatever value in x0 as a return value,
+		 * but this might result in a bogus value being returned.
+		 */
+		/*
+		 * NOTE: syscallno may also be set to -1 if fatal signal is
+		 * detected in tracehook_report_syscall_entry(), but since
+		 * a value set to x0 here is not used in this case, we may
+		 * neglect the case.
+		 */
+		if (!test_thread_flag(TIF_SYSCALL_TRACE) ||
+				(IS_SKIP_SYSCALL(saved_syscallno)))
+			regs->regs[0] = -ENOSYS;
+	}
 
 	return regs->syscallno;
 }

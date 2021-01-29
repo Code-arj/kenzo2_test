@@ -40,6 +40,9 @@
 #ifdef CONFIG_SND_PCM
 #include "f_audio_source.c"
 #endif
+#ifdef CONFIG_SND_RAWMIDI
+#include "f_midi.c"
+#endif
 #include "f_mass_storage.c"
 #define USB_ETH_RNDIS y
 #include "f_diag.c"
@@ -91,6 +94,11 @@ static const char longname[] = "Gadget Android";
 #define PRODUCT_ID		0x0001
 
 #define ANDROID_DEVICE_NODE_NAME_LENGTH 11
+/* f_midi configuration */
+#define MIDI_INPUT_PORTS    1
+#define MIDI_OUTPUT_PORTS   1
+#define MIDI_BUFFER_SIZE    1024
+#define MIDI_QUEUE_LENGTH   32
 
 struct android_usb_function {
 	char *name;
@@ -301,10 +309,31 @@ static void android_pm_qos_update_latency(struct android_dev *dev, s32 latency)
 		return;
 
 	pr_debug("%s: latency updated to: %d\n", __func__, latency);
-
-	pm_qos_update_request(&dev->pm_qos_req_dma, latency);
-
-	last_vote = latency;
+	if (latency == PM_QOS_DEFAULT_VALUE) {
+		pm_qos_update_request(&dev->pm_qos_req_dma, latency);
+		last_vote = latency;
+		pm_qos_remove_request(&dev->pm_qos_req_dma);
+	} else {
+		if (!pm_qos_request_active(&dev->pm_qos_req_dma)) {
+			/*
+			 * The default request type PM_QOS_REQ_ALL_CORES is
+			 * applicable to all CPU cores that are online and
+			 * would have a power impact when there are more
+			 * number of CPUs. PM_QOS_REQ_AFFINE_IRQ request
+			 * type shall update/apply the vote only to that CPU to
+			 * which IRQ's affinity is set to.
+			 */
+#ifdef CONFIG_SMP
+			dev->pm_qos_req_dma.type = PM_QOS_REQ_AFFINE_IRQ;
+			dev->pm_qos_req_dma.irq =
+				dev->cdev->gadget->interrupt_num;
+#endif
+			pm_qos_add_request(&dev->pm_qos_req_dma,
+				PM_QOS_CPU_DMA_LATENCY, PM_QOS_DEFAULT_VALUE);
+		}
+		pm_qos_update_request(&dev->pm_qos_req_dma, latency);
+		last_vote = latency;
+	}
 }
 
 #define DOWN_PM_QOS_SAMPLE_SEC		5
@@ -467,7 +496,7 @@ static void android_work(struct work_struct *data)
 		}
 		pr_info("%s: sent uevent %s\n", __func__, uevent_envp[0]);
 	} else {
-		pr_info("%s: did not send uevent (%d %d %p)\n", __func__,
+		pr_info("%s: did not send uevent (%d %d %pK)\n", __func__,
 			 dev->connected, dev->sw_connected, cdev->config);
 	}
 }
@@ -1825,6 +1854,19 @@ static int serial_function_bind_config(struct android_usb_function *f,
 			}
 		}
 	}
+	/*
+	 * Make sure we always have two serials ports initialized to allow
+	 * switching composition from 1 serial function to 2 serial functions.
+	 * Mark 2nd port to use tty if user didn't specify transport.
+	 */
+	if ((config->instances_on == 1) && !serial_initialized) {
+		err = gserial_init_port(ports, "tty", "serial_tty");
+		if (err) {
+			pr_err("serial: Cannot open port '%s'", "tty");
+			goto out;
+		}
+		config->instances_on++;
+	}
 
 	/* limit the serial ports init only for boot ports */
 	if (ports > config->instances_on)
@@ -1839,8 +1881,7 @@ static int serial_function_bind_config(struct android_usb_function *f,
 		goto out;
 	}
 
-	config->instances_on = ports;
-	for (i = 0; i < ports; i++) {
+	for (i = 0; i < config->instances_on; i++) {
 		config->f_serial_inst[i] = usb_get_function_instance("gser");
 		if (IS_ERR(config->f_serial_inst[i])) {
 			err = PTR_ERR(config->f_serial_inst[i]);
@@ -2764,7 +2805,8 @@ static ssize_t audio_source_pcm_show(struct device *dev,
 	struct audio_source_config *config = f->config;
 
 	/* print PCM card and device numbers */
-	return sprintf(buf, "%d %d\n", config->card, config->device);
+	return snprintf(buf, PAGE_SIZE,
+			"%d %d\n", config->card, config->device);
 }
 
 static DEVICE_ATTR(pcm, S_IRUGO, audio_source_pcm_show, NULL);
@@ -2830,6 +2872,61 @@ static struct android_usb_function uasp_function = {
 	.bind_config	= uasp_function_bind_config,
 };
 
+#ifdef CONFIG_SND_RAWMIDI
+static int midi_function_init(struct android_usb_function *f,
+					struct usb_composite_dev *cdev)
+{
+	struct midi_alsa_config *config;
+
+	config = kzalloc(sizeof(struct midi_alsa_config), GFP_KERNEL);
+	f->config = config;
+	if (!config)
+		return -ENOMEM;
+	config->card = -1;
+	config->device = -1;
+	return 0;
+}
+
+static void midi_function_cleanup(struct android_usb_function *f)
+{
+	kfree(f->config);
+}
+
+static int midi_function_bind_config(struct android_usb_function *f,
+						struct usb_configuration *c)
+{
+	struct midi_alsa_config *config = f->config;
+
+	return f_midi_bind_config(c, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1,
+			MIDI_INPUT_PORTS, MIDI_OUTPUT_PORTS, MIDI_BUFFER_SIZE,
+			MIDI_QUEUE_LENGTH, config);
+}
+
+static ssize_t midi_alsa_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct android_usb_function *f = dev_get_drvdata(dev);
+	struct midi_alsa_config *config = f->config;
+
+	/* print ALSA card and device numbers */
+	return sprintf(buf, "%d %d\n", config->card, config->device);
+}
+
+static DEVICE_ATTR(alsa, S_IRUGO, midi_alsa_show, NULL);
+
+static struct device_attribute *midi_function_attributes[] = {
+	&dev_attr_alsa,
+	NULL
+};
+
+static struct android_usb_function midi_function = {
+	.name		= "midi",
+	.init		= midi_function_init,
+	.cleanup	= midi_function_cleanup,
+	.bind_config	= midi_function_bind_config,
+	.attributes	= midi_function_attributes,
+};
+#endif
 static struct android_usb_function *supported_functions[] = {
 	&ffs_function,
 	&mbim_function,
@@ -2859,6 +2956,9 @@ static struct android_usb_function *supported_functions[] = {
 #endif
 	&uasp_function,
 	&charger_function,
+#ifdef CONFIG_SND_RAWMIDI
+	&midi_function,
+#endif
 	NULL
 };
 
@@ -3791,7 +3891,7 @@ static int usb_diag_update_pid_and_serial_num(u32 pid, const char *snum)
 		return -ENODEV;
 	}
 
-	pr_debug("%s: dload:%p pid:%x serial_num:%s\n",
+	pr_debug("%s: dload:%pK pid:%x serial_num:%s\n",
 				__func__, diag_dload, pid, snum);
 
 	/* update pid */
@@ -3958,21 +4058,6 @@ static int android_probe(struct platform_device *pdev)
 	/* pm qos request to prevent apps idle power collapse */
 	android_dev->curr_pm_qos_state = NO_USB_VOTE;
 	if (pdata && pdata->pm_qos_latency[0]) {
-		/*
-		 * The default request type PM_QOS_REQ_ALL_CORES is
-		 * applicable to all CPU cores that are online and
-		 * would have a power impact when there are more
-		 * number of CPUs. PM_QOS_REQ_AFFINE_IRQ request
-		 * type shall update/apply the vote only to that CPU to
-		 * which IRQ's affinity is set to.
-		 */
-#ifdef CONFIG_SMP
-		android_dev->pm_qos_req_dma.type = PM_QOS_REQ_AFFINE_IRQ;
-		android_dev->pm_qos_req_dma.irq =
-				android_dev->cdev->gadget->interrupt_num;
-#endif
-		pm_qos_add_request(&android_dev->pm_qos_req_dma,
-			PM_QOS_CPU_DMA_LATENCY, PM_QOS_DEFAULT_VALUE);
 		android_dev->down_pm_qos_sample_sec = DOWN_PM_QOS_SAMPLE_SEC;
 		android_dev->down_pm_qos_threshold = DOWN_PM_QOS_THRESHOLD;
 		android_dev->up_pm_qos_sample_sec = UP_PM_QOS_SAMPLE_SEC;

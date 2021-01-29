@@ -73,6 +73,9 @@
 #define MSS_RESTART_ID			0xA
 
 #define MSS_MAGIC			0XAABADEAD
+enum scm_cmd {
+	PAS_MEM_SETUP_CMD = 2,
+};
 
 static int pbl_mba_boot_timeout_ms = 1000;
 module_param(pbl_mba_boot_timeout_ms, int, S_IRUGO | S_IWUSR);
@@ -223,10 +226,11 @@ static int pil_msa_wait_for_mba_ready(struct q6v5_data *drv)
 	struct device *dev = drv->desc.dev;
 	int ret;
 	u32 status;
+	u64 val = is_timeout_disabled() ? 0 : pbl_mba_boot_timeout_ms * 1000;
 
 	/* Wait for PBL completion. */
 	ret = readl_poll_timeout(drv->rmb_base + RMB_PBL_STATUS, status,
-		status != 0, POLL_INTERVAL_US, pbl_mba_boot_timeout_ms * 1000);
+				 status != 0, POLL_INTERVAL_US, val);
 	if (ret) {
 		dev_err(dev, "PBL boot timed out\n");
 		return ret;
@@ -238,7 +242,7 @@ static int pil_msa_wait_for_mba_ready(struct q6v5_data *drv)
 
 	/* Wait for MBA completion. */
 	ret = readl_poll_timeout(drv->rmb_base + RMB_MBA_STATUS, status,
-		status != 0, POLL_INTERVAL_US, pbl_mba_boot_timeout_ms * 1000);
+				status != 0, POLL_INTERVAL_US, val);
 	if (ret) {
 		dev_err(dev, "MBA boot timed out\n");
 		return ret;
@@ -273,6 +277,18 @@ int pil_mss_shutdown(struct pil_desc *pil)
 	if (drv->axi_halt_nc)
 		pil_q6v5_halt_axi_port(pil, drv->axi_halt_nc);
 
+	/*
+	 * Software workaround to avoid high MX current during LPASS/MSS
+	 * restart.
+	 */
+	if (drv->mx_spike_wa && drv->ahb_clk_vote) {
+		ret = clk_prepare_enable(drv->ahb_clk);
+		if (!ret)
+			assert_clamps(pil);
+		else
+			dev_err(pil->dev, "error turning ON AHB clock\n");
+	}
+
 	ret = pil_mss_restart_reg(drv, 1);
 
 	if (drv->is_booted) {
@@ -290,13 +306,14 @@ int __pil_mss_deinit_image(struct pil_desc *pil, bool err_path)
 	struct q6v5_data *q6_drv = container_of(pil, struct q6v5_data, desc);
 	int ret = 0;
 	s32 status;
+	u64 val = is_timeout_disabled() ? 0 : pbl_mba_boot_timeout_ms * 1000;
 
 	if (err_path) {
 		writel_relaxed(CMD_PILFAIL_NFY_MBA,
 				drv->rmb_base + RMB_MBA_COMMAND);
 		ret = readl_poll_timeout(drv->rmb_base + RMB_MBA_STATUS, status,
-			status == STATUS_MBA_UNLOCKED || status < 0,
-			POLL_INTERVAL_US, pbl_mba_boot_timeout_ms * 1000);
+				status == STATUS_MBA_UNLOCKED || status < 0,
+				POLL_INTERVAL_US, val);
 		if (ret)
 			dev_err(pil->dev, "MBA region unlock timed out\n");
 		else if (status < 0)
@@ -371,6 +388,44 @@ void pil_mss_remove_proxy_votes(struct pil_desc *pil)
 	pil_q6v5_remove_proxy_votes(pil);
 	regulator_disable(drv->vreg_mx);
 	regulator_set_voltage(drv->vreg_mx, 0, INT_MAX);
+}
+
+static int pil_mss_mem_setup(struct pil_desc *pil,
+					phys_addr_t addr, size_t size)
+{
+	struct modem_data *md = dev_get_drvdata(pil->dev);
+
+	struct pas_init_image_req {
+		u32	proc;
+		u32	start_addr;
+		u32	len;
+	} request;
+	u32 scm_ret = 0;
+	int ret;
+	struct scm_desc desc = {0};
+
+	if (!md->subsys_desc.pil_mss_memsetup)
+		return 0;
+
+	request.proc = md->pas_id;
+	request.start_addr = addr;
+	request.len = size;
+
+	if (!is_scm_armv8()) {
+		ret = scm_call(SCM_SVC_PIL, PAS_MEM_SETUP_CMD, &request,
+				sizeof(request), &scm_ret, sizeof(scm_ret));
+	} else {
+		desc.args[0] = md->pas_id;
+		desc.args[1] = addr;
+		desc.args[2] = size;
+		desc.arginfo = SCM_ARGS(3);
+		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_PIL, PAS_MEM_SETUP_CMD),
+				&desc);
+		scm_ret = desc.ret[0];
+	}
+	if (ret)
+		return ret;
+	return scm_ret;
 }
 
 static int pil_mss_reset(struct pil_desc *pil)
@@ -461,7 +516,7 @@ int pil_mss_reset_load_mba(struct pil_desc *pil)
 {
 	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
 	struct modem_data *md = dev_get_drvdata(pil->dev);
-	const struct firmware *fw, *dp_fw;
+	const struct firmware *fw, *dp_fw = NULL;
 	char fw_name_legacy[10] = "mba.b00";
 	char fw_name[10] = "mba.mbn";
 	char *dp_name = "msadp";
@@ -578,6 +633,7 @@ static int pil_msa_auth_modem_mdt(struct pil_desc *pil, const u8 *metadata,
 	dma_addr_t mdata_phys;
 	s32 status;
 	int ret;
+	u64 val = is_timeout_disabled() ? 0 : modem_auth_timeout_ms * 1000;
 	DEFINE_DMA_ATTRS(attrs);
 
 	drv->mba_mem_dev.coherent_dma_mask =
@@ -602,8 +658,8 @@ static int pil_msa_auth_modem_mdt(struct pil_desc *pil, const u8 *metadata,
 	writel_relaxed(mdata_phys, drv->rmb_base + RMB_PMI_META_DATA);
 	writel_relaxed(CMD_META_DATA_READY, drv->rmb_base + RMB_MBA_COMMAND);
 	ret = readl_poll_timeout(drv->rmb_base + RMB_MBA_STATUS, status,
-		status == STATUS_META_DATA_AUTH_SUCCESS || status < 0,
-		POLL_INTERVAL_US, modem_auth_timeout_ms * 1000);
+			status == STATUS_META_DATA_AUTH_SUCCESS || status < 0,
+			POLL_INTERVAL_US, val);
 	if (ret) {
 		dev_err(pil->dev, "MBA authentication of headers timed out\n");
 	} else if (status < 0) {
@@ -679,11 +735,11 @@ static int pil_msa_mba_auth(struct pil_desc *pil)
 	struct q6v5_data *q6_drv = container_of(pil, struct q6v5_data, desc);
 	int ret;
 	s32 status;
+	u64 val = is_timeout_disabled() ? 0 : modem_auth_timeout_ms * 1000;
 
 	/* Wait for all segments to be authenticated or an error to occur */
 	ret = readl_poll_timeout(drv->rmb_base + RMB_MBA_STATUS, status,
-			status == STATUS_AUTH_COMPLETE || status < 0,
-			50, modem_auth_timeout_ms * 1000);
+		status == STATUS_AUTH_COMPLETE || status < 0, 50, val);
 	if (ret) {
 		dev_err(pil->dev, "MBA authentication of image timed out\n");
 	} else if (status < 0) {
@@ -736,6 +792,7 @@ struct pil_reset_ops pil_msa_mss_ops_selfauth = {
 	.init_image = pil_msa_mss_reset_mba_load_auth_mdt,
 	.proxy_vote = pil_mss_make_proxy_votes,
 	.proxy_unvote = pil_mss_remove_proxy_votes,
+	.mem_setup = pil_mss_mem_setup,
 	.verify_blob = pil_msa_mba_verify_blob,
 	.auth_and_reset = pil_msa_mba_auth,
 	.deinit_image = pil_mss_deinit_image,
